@@ -1,0 +1,320 @@
+````yaml
+schema_version: "openenv/v1"
+
+env_id: "MedicalTriage-v1"
+display_name: "AI Medical Triage & Clinical Documentation Environment"
+version: "1.0.0"
+description: |
+  An OpenEnv-compatible environment that challenges AI agents to perform
+  emergency department triage and clinical documentation. Agents receive
+  partial patient observations and must produce structured TriageAction objects
+  covering ESI triage level, diagnostic orders, treatments, clinical notes,
+  disposition, and a reasoning chain.
+
+author: "AI Medical Triage Team"
+license: "apache-2.0"
+tags:
+  - medical
+  - triage
+  - clinical-documentation
+  - emergency-medicine
+  - llm-evaluation
+  - openenv
+
+deployment:
+  type: docker
+  port: 7860
+  base_url: "http://localhost:7860"
+  huggingface_spaces:
+    sdk: docker
+    hardware: "cpu-basic"
+    pinned: false
+    emoji: "🏥"
+    color_from: blue
+    color_to: green
+  environment_variables:
+    required: []
+    optional:
+      - name: ANTHROPIC_API_KEY
+        description: API key for HardGrader LLM judge. Falls back to automated scoring if absent.
+      - name: SESSION_TTL_SECONDS
+        default: "1800"
+      - name: MAX_SESSIONS
+        default: "100"
+      - name: RATE_LIMIT_RPM
+        default: "60"
+      - name: LOG_LEVEL
+        default: "info"
+      - name: WORKERS
+        default: "1"
+        description: Keep at 1 — in-memory SessionStore is not shared across processes.
+
+api:
+  reset:
+    method: POST
+    path: /env/reset
+    description: Start a new episode. Returns session_id and first PatientObservation.
+    status_codes:
+      201: "Episode created successfully"
+      429: "Rate limit exceeded"
+      503: "Server at maximum session capacity"
+
+  step:
+    method: POST
+    path: /env/step
+    description: Submit a TriageAction. Returns next observation, reward, done flag.
+    headers:
+      required:
+        - name: X-Session-ID
+    status_codes:
+      200: "Step processed"
+      400: "Missing X-Session-ID"
+      404: "Session not found or expired"
+      409: "Episode already done"
+      429: "Rate limit exceeded"
+
+  state:
+    method: GET
+    path: /env/state
+    description: Return session metadata without advancing the episode.
+    headers:
+      required:
+        - name: X-Session-ID
+    status_codes:
+      200: "State returned"
+      400: "Missing X-Session-ID"
+      404: "Session not found"
+
+  observation:
+    method: GET
+    path: /env/observation
+    description: Return current PatientObservation without advancing.
+    headers:
+      required:
+        - name: X-Session-ID
+
+  grade:
+    method: POST
+    path: /grade/trajectory
+    description: Grade a completed episode trajectory.
+
+  leaderboard:
+    method: GET
+    path: /grade/leaderboard
+    description: Top scores sorted by total_score descending.
+    query_params:
+      - name: tier
+        type: string
+        required: false
+      - name: limit
+        type: integer
+        default: 20
+
+  health:
+    method: GET
+    path: /health
+
+observation_schema:
+  type: object
+  fields:
+    case_id: {type: string, format: uuid}
+    step: {type: integer, minimum: 0}
+    elapsed_time_seconds: {type: integer, minimum: 0}
+    demographics:
+      type: object
+      fields:
+        age: {type: integer, minimum: 0, maximum: 120}
+        sex: {type: string, enum: [M, F, X]}
+        weight_kg: {type: number}
+        height_cm: {type: number}
+        pregnant: {type: boolean, nullable: true}
+    vitals:
+      type: object
+      fields:
+        heart_rate: {type: integer}
+        bp_systolic: {type: integer}
+        bp_diastolic: {type: integer}
+        respiratory_rate: {type: integer}
+        spo2: {type: number, minimum: 0.0, maximum: 1.0}
+        temperature_celsius: {type: number}
+        gcs: {type: integer, minimum: 3, maximum: 15}
+        pain_score: {type: integer, minimum: 0, maximum: 10}
+    chief_complaint:
+      type: object
+      fields:
+        text: {type: string}
+        onset_hours: {type: number}
+        severity_0_10: {type: integer}
+        associated_symptoms: {type: array, items: {type: string}}
+    comorbidities: {type: array}
+    current_medications: {type: array}
+    allergies: {type: array, items: {type: string}}
+    available_diagnostics: {type: array, items: {type: string}}
+
+action_schema:
+  type: object
+  required_fields: [assigned_triage_level, clinical_note, confidence_score, reasoning_chain]
+  fields:
+    assigned_triage_level: {type: string, enum: [ESI_1, ESI_2, ESI_3, ESI_4, ESI_5, UNKNOWN]}
+    diagnostic_orders:
+      type: array
+      items:
+        type: object
+        fields:
+          test_name: {type: string}
+          rationale: {type: string, minimum_length: 5}
+          expected_turnaround_minutes: {type: integer, minimum: 1}
+    treatments:
+      type: array
+      items:
+        type: object
+        fields:
+          intervention: {type: string}
+          dose_if_applicable: {type: string, nullable: true}
+          rationale: {type: string}
+          priority: {type: string, enum: [IMMEDIATE, URGENT, ROUTINE]}
+    clinical_note:
+      type: object
+      required: true
+      fields:
+        chief_complaint_summary: {type: string, minimum_length: 20}
+        history_of_present_illness: {type: string, minimum_length: 100}
+        physical_exam_findings: {type: string, minimum_length: 50}
+        assessment: {type: string, minimum_length: 50}
+        plan: {type: string, minimum_length: 50}
+        differential_diagnoses: {type: array, minimum_items: 1, maximum_items: 5}
+    disposition:
+      type: string
+      enum: [ADMIT_ICU, ADMIT_FLOOR, OBSERVATION, DISCHARGE_HOME, DISCHARGE_PCP_FOLLOWUP, TRANSFER, PENDING]
+    confidence_score: {type: number, minimum: 0.0, maximum: 1.0}
+    reasoning_chain: {type: string, minimum_length: 50}
+    is_final: {type: boolean, default: false}
+
+reward_schema:
+  type: object
+  fields:
+    total_reward: {type: number, minimum: -1.0, maximum: 1.0}
+    scaled_score: {type: number, minimum: 0.0, maximum: 100.0}
+    triage_accuracy_score: {type: number, minimum: 0.0, maximum: 1.0}
+    documentation_score: {type: number, minimum: 0.0, maximum: 1.0}
+    diagnostic_appropriateness_score: {type: number, minimum: 0.0, maximum: 1.0}
+    treatment_safety_score: {type: number, minimum: 0.0, maximum: 1.0}
+    time_efficiency_score: {type: number, minimum: 0.0, maximum: 1.0}
+    penalty_flags: {type: array, items: {type: string}}
+    penalty_total: {type: number, maximum: 0.0}
+    step: {type: integer, minimum: 0}
+
+graders:
+  easy:
+    class: "graders.easy_grader.EasyGrader"
+    pass_threshold: 1.0
+    description: >
+      Binary pass/fail. All six conditions must be met: ESI exact match,
+      note completeness, >= 1 required diagnostic ordered, no allergy violations,
+      no unsafe discharge, committed disposition.
+    scoring: binary_pass_fail
+
+  medium:
+    class: "graders.medium_grader.MediumGrader"
+    pass_threshold: 0.70
+    description: >
+      Weighted rubric across five dimensions with partial credit.
+      Safety violations hard-cap the total at 0.60.
+    scoring: weighted_rubric
+    weights:
+      triage_accuracy: 0.25
+      documentation_quality: 0.25
+      diagnostic_workup: 0.20
+      treatment_safety: 0.20
+      time_to_disposition: 0.10
+
+  hard:
+    class: "graders.hard_grader.HardGrader"
+    pass_threshold: 0.80
+    description: >
+      Two-stage: automated rubric (60%) fused with LLM judge (40%).
+      Hidden finding detection earns +0.10 bonus. Safety concerns and
+      critical misses apply hard caps. Falls back to automated-only
+      when ANTHROPIC_API_KEY is absent.
+    scoring: llm_assisted_rubric
+    fusion_weights:
+      automated: 0.60
+      llm_judge: 0.40
+    requires_api_key: true
+    fallback: automated_only
+
+patient_generator:
+  class: "env.patient_generator.PatientGenerator"
+  esi_distribution:
+    ESI_1: 0.05
+    ESI_2: 0.15
+    ESI_3: 0.40
+    ESI_4: 0.25
+    ESI_5: 0.15
+  difficulty_profiles:
+    easy:
+      hidden_findings: 0
+      comorbidities: "0-1"
+      drug_interactions: none
+      vital_ambiguity: clear
+    medium:
+      hidden_findings: 1
+      comorbidities: "1-3"
+      drug_interactions: mild
+      vital_ambiguity: borderline
+    hard:
+      hidden_findings: "2-3"
+      comorbidities: "3-5"
+      drug_interactions: severe
+      vital_ambiguity: near_normal_masking_severity
+
+episode:
+  max_steps: 10
+  max_elapsed_seconds: 1800
+  deterioration_enabled: true
+  deterioration_interval_steps: 3
+  reward_shaping_enabled: true
+  allow_multi_step: true
+  strict_action_validation: true
+
+reward:
+  weights:
+    triage_accuracy: 0.30
+    documentation: 0.25
+    diagnostic_appropriateness: 0.20
+    treatment_safety: 0.15
+    time_efficiency: 0.10
+  penalties:
+    CRITICAL_MISS: -0.40
+    UNSAFE_DISCHARGE: -0.50
+    ALLERGY_VIOLATION: -0.50
+    EMPTY_DOCUMENTATION: -0.20
+    OVERCONFIDENCE: -0.05
+    UNDER_TRIAGE: -0.30
+  intermediate_step_weight: 0.40
+  trajectory_discount_gamma: 0.85
+  time_efficiency_floor: 0.20
+
+evaluation:
+  standard_eval:
+    n_episodes: 100
+    difficulty_distribution:
+      easy: 0.33
+      medium: 0.34
+      hard: 0.33
+    seeds: "range(0, 100)"
+    metrics:
+      - mean_total_score
+      - pass_rate
+      - mean_triage_accuracy
+      - mean_documentation_score
+      - critical_miss_rate
+      - allergy_violation_rate
+  quick_eval:
+    n_episodes: 10
+    difficulty_distribution:
+      easy: 0.4
+      medium: 0.4
+      hard: 0.2
+    seeds: "range(0, 10)"
+````
