@@ -57,6 +57,7 @@ COPY --chown=appuser:appgroup agents/      /app/agents/
 COPY --chown=appuser:appgroup inference.py /app/inference.py
 COPY --chown=appuser:appgroup openenv.yaml /app/openenv.yaml
 COPY --chown=appuser:appgroup README.md    /app/README.md
+COPY --chown=appuser:appgroup app.py /app/app.py
 
 EXPOSE 7860
 
@@ -71,12 +72,5 @@ HEALTHCHECK \
         | python3 -c "import sys,json; d=json.load(sys.stdin); sys.exit(0 if d.get('status')=='ok' else 1)" \
         || exit 1
 
-CMD ["uvicorn", \
-     "server.api_server:app", \
-     "--host", "0.0.0.0", \
-     "--port", "7860", \
-     "--workers", "1", \
-     "--timeout-keep-alive", "30", \
-     "--log-level", "info", \
-     "--no-access-log"]
+CMD ["bash", "-c", "uvicorn server.api_server:app --host 0.0.0.0 --port 8000 & python app.py"]
 ````
